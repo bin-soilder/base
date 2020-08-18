@@ -4,8 +4,10 @@ import(
 	"fmt"
 	"strings"
 	"errors"
+	"time"
 	_gorm "github.com/jinzhu/gorm"
 	"github.com/xxxmicro/base/domain/model"
+	"github.com/xxxmicro/base/types/smarttime"
 )
 
 var (
@@ -13,7 +15,7 @@ var (
 )
 
 // 约定 name为小写
-func FindColumn(name string, ms *_gorm.ModelStruct, dbHandler *_gorm.DB) (*_gorm.StructField, bool) {
+func FindField(name string, ms *_gorm.ModelStruct, dbHandler *_gorm.DB) (*_gorm.StructField, bool) {
 	name = strings.ToLower(name)
 
 	tableName := ms.TableName(dbHandler)
@@ -71,17 +73,34 @@ func gormFilter(db *_gorm.DB, ms *_gorm.ModelStruct, key string, value interface
 		}
 	default:
 		{
-			if _, ok := FindColumn(key, ms, db); !ok {
+			field, ok := FindField(key, ms, db)
+			if !ok {
 				err := errors.New(fmt.Sprintf("ERR_DB_UNKNOWN_FIELD %s", key))
 				return nil, err
 			}
 
 			vMap, ok := value.(map[string]interface{})
 			if !ok {
+				switch field.Struct.Type.String() {
+				case "time.Time", "*time.Time":
+					v, err := smarttime.Parse(value)
+					if err == nil {
+						value = time.Time(v)
+					}	
+				}
+			
 				return db.Where(fmt.Sprintf("%s = ?", key), value), nil
 			}
 
 			for vKey, vValue := range vMap {
+				switch field.Struct.Type.String() {
+				case "time.Time", "*time.Time":
+					v, err := smarttime.Parse(vValue)
+					if err == nil {
+						vValue = v
+					}
+				}
+
 				filterType = model.FilterType(vKey)
 				switch filterType {
 				case model.FilterType_EQ:
@@ -166,7 +185,7 @@ func buildSort(dbHandler *_gorm.DB, ms *_gorm.ModelStruct, sorts []*model.SortSp
 
 	for _, sort := range sorts {
 		sortKey := sort.Property
-		if _, ok := FindColumn(sortKey, ms, dbHandler); !ok {
+		if _, ok := FindField(sortKey, ms, dbHandler); !ok {
 			err = errors.New(fmt.Sprintf("unknown field: %s", sortKey))
 			return
 		}

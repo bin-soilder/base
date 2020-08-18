@@ -1,13 +1,13 @@
 package gorm
 
-import(
-	"fmt"
+import (
 	"context"
 	"errors"
+	"fmt"
 	_gorm "github.com/jinzhu/gorm"
-	"github.com/xxxmicro/base/database/gorm"
-	"github.com/xxxmicro/base/domain/repository"
+	"github.com/xxxmicro/base/database/gorm/opentracing"
 	"github.com/xxxmicro/base/domain/model"
+	"github.com/xxxmicro/base/domain/repository"
 	breflect "github.com/xxxmicro/base/reflect"
 )
 
@@ -20,25 +20,46 @@ func NewBaseRepository(db *_gorm.DB) repository.BaseRepository {
 }
 
 func (r *baseRepository) Create(c context.Context, m model.Model) error {
-	db := gorm.SetSpanToGorm(c, r.db)
+	db := opentracing.SetSpanToGorm(c, r.db)
 
 	return db.Create(m).Error
 }
 
-func (r *baseRepository) Update(c context.Context, m model.Model) error {
-	db := gorm.SetSpanToGorm(c, r.db)
+func (r *baseRepository) Upsert(c context.Context, m model.Model) (*repository.ChangeInfo, error) {
+	db := opentracing.SetSpanToGorm(c, r.db)
 
-	return db.Save(m).Error
+	result := db.Save(m)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	change := &repository.ChangeInfo{
+		Updated: int(result.RowsAffected),
+	}
+	return change, nil
 }
 
+func (r *baseRepository) Update(c context.Context, m model.Model, data interface{}) error {
+	db := opentracing.SetSpanToGorm(c, r.db)
+
+	// 主键保护，如果 m 什么都没设置，这里将会删除表的所有记录
+	scope := r.db.NewScope(m)
+	if scope.PrimaryKeyZero() {
+		return errors.New(fmt.Sprintf("primary key(%s) must be set for update", scope.PrimaryKey()))
+	}
+
+	return db.Model(m).Update(data).Error
+}
+
+
 func (r *baseRepository) FindOne(c context.Context, m model.Model) error {
-	db := gorm.SetSpanToGorm(c, r.db)
+	db := opentracing.SetSpanToGorm(c, r.db)
 
 	return db.Where(m.Unique()).Take(m).Error
 }
 
 func (r *baseRepository) Delete(c context.Context, m model.Model) error {
-	// TODO 这里要做主键保护，如果 m 什么都没设置，这里将会删除表的所有记录
+	// 主键保护，如果 m 什么都没设置，这里将会删除表的所有记录
 	ms := r.db.NewScope(m).GetModelStruct()
 	for _, pf := range ms.PrimaryFields {		
 		value, err := breflect.GetStructField(m, pf.Name)
@@ -55,7 +76,7 @@ func (r *baseRepository) Delete(c context.Context, m model.Model) error {
 }
 
 
-func (r *baseRepository) Page(c context.Context, query *model.PageQuery, m model.Model, resultPtr interface{}) (total int, pageCount int, err error){
+func (r *baseRepository) Page(c context.Context, m model.Model, query *model.PageQuery, resultPtr interface{}) (total int, pageCount int, err error){
 	// items := breflect.MakeSlicePtr(m, 0, 0)
 	ms := r.db.NewScope(m).GetModelStruct()
 
@@ -84,7 +105,7 @@ func (r *baseRepository) Cursor(c context.Context, query *model.CursorQuery, m m
 		return
 	}
 
-	dbHandler, reverse, err := GormCursorFilter(dbHandler, ms, query)
+	dbHandler, reverse, err := gormCursorFilter(dbHandler, ms, query)
 	if err != nil {
 		return
 	}
@@ -105,7 +126,7 @@ func (r *baseRepository) Cursor(c context.Context, query *model.CursorQuery, m m
 	count := breflect.SlicePtrLen(resultPtr)
 	if count > 0 {
 		minItem := breflect.SlicePtrIndexOf(resultPtr, 0)
-		field, ok := FindColumn(query.CursorSort.Property, ms, dbHandler)
+		field, ok := FindField(query.CursorSort.Property, ms, dbHandler)
 		if !ok {
 			err = errors.New("field not found")
 			return
